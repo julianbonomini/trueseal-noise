@@ -31,6 +31,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check tag matches Cargo.toml version
+        run: scripts/check-tag-version.sh "${{ github.ref_name }}"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt

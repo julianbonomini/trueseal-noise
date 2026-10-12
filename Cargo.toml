@@ -3,7 +3,7 @@ name = "trueseal-noise"
 version = "0.1.0"
 edition = "2021"
 description = "Noise Protocol Framework — Noise_XX_25519_ChaChaPoly_BLAKE2s"
-license = "MIT"
+license = "Apache-2.0"
 publish = false  # not published until open-sourced
 
 [lib]
