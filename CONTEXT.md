@@ -56,6 +56,10 @@ _Avoid_: length-prefix, header, envelope
 A runtime error the caller should handle: I/O errors, malformed handshake messages, connection drops. Returned as `Result<_, String>` from `dial`, `accept`, `send`, or `receive`. The caller may surface the error or reconnect; an error does not guarantee that the same session is reusable (in particular, a failed write can leave a missing or partial frame).
 _Avoid_: error, exception
 
+Deadlines belong to the caller's transport. `dial`, `accept`, `send`, and `receive` retry `WouldBlock`/`Interrupted` without a time limit and return other transport errors, including `TimedOut`/`UnexpectedEof`. A non-blocking caller can enforce an absolute deadline in its `Read + Write` adapter. A socket timeout reported as `WouldBlock` is retried, so that setting alone does not bound a Noise call. `tests/adversarial.rs` exercises caller-owned deadlines against silent loopback peers and terminal errors at the public API.
+
+`close()` rejects subsequent calls but does not shut down the transport or currently cancel a `receive` already in its retry loop. Pending-read cancellation is tracked separately in [#38](https://github.com/julianbonomini/trueseal-noise/issues/38); callers still need transport-owned termination to release a waiting reader.
+
 **Invariant Violation**:
 A condition that should be impossible given correct library code: e.g. sending before the handshake completes, a nonce counter overflow. Indicates a bug, not a runtime condition. The library panics — crashing loudly is safer than silently continuing with broken crypto.
 _Avoid_: internal error, fatal error

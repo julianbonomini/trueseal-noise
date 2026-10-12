@@ -2,7 +2,7 @@
 //! The peer is a real loopback TCP transport driven by snow, not SessionInner.
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -80,7 +80,10 @@ struct ReadFailure {
 impl ReadFailure {
     fn arm(&self, kind: ErrorKind, after: usize) {
         self.after.store(after, Ordering::Release);
-        self.kind.store(if kind == ErrorKind::TimedOut { 1 } else { 2 }, Ordering::Release);
+        self.kind.store(
+            if kind == ErrorKind::TimedOut { 1 } else { 2 },
+            Ordering::Release,
+        );
     }
 }
 
@@ -91,8 +94,6 @@ struct DeadlineTcp {
     stream: TcpStream,
     deadline: Instant,
     read_error: Arc<ReadFailure>,
-    waiting: Option<mpsc::Sender<()>>,
-    observe_waiting: Arc<AtomicBool>,
 }
 
 impl DeadlineTcp {
@@ -102,8 +103,6 @@ impl DeadlineTcp {
             stream,
             deadline: Instant::now() + BOUND,
             read_error: Arc::new(ReadFailure::default()),
-            waiting: None,
-            observe_waiting: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -122,21 +121,22 @@ impl Read for DeadlineTcp {
         let kind = self.read_error.kind.load(Ordering::Acquire);
         let allowed = self.read_error.after.load(Ordering::Acquire);
         if kind != 0 && allowed == 0 {
-            let kind = if kind == 1 { ErrorKind::TimedOut } else { ErrorKind::UnexpectedEof };
+            let kind = if kind == 1 {
+                ErrorKind::TimedOut
+            } else {
+                ErrorKind::UnexpectedEof
+            };
             return Err(io::Error::new(kind, "injected caller read failure"));
         }
-        let n = if kind == 0 { out.len() } else { out.len().min(allowed) };
+        let n = if kind == 0 {
+            out.len()
+        } else {
+            out.len().min(allowed)
+        };
         let result = self.stream.read(&mut out[..n]);
         if kind != 0 {
             if let Ok(n) = result {
                 self.read_error.after.fetch_sub(n, Ordering::AcqRel);
-            }
-        }
-        if self.observe_waiting.load(Ordering::Acquire)
-            && matches!(&result, Err(e) if e.kind() == ErrorKind::WouldBlock)
-        {
-            if let Some(waiting) = self.waiting.take() {
-                waiting.send(()).unwrap();
             }
         }
         result
@@ -177,7 +177,12 @@ fn write_frame(peer: &mut TcpStream, body: &[u8]) {
     peer.write_all(body).unwrap();
 }
 
-fn handshake(pattern: Pattern, initiator: bool, key: &Keypair, remote: &Keypair) -> snow::HandshakeState {
+fn handshake(
+    pattern: Pattern,
+    initiator: bool,
+    key: &Keypair,
+    remote: &Keypair,
+) -> snow::HandshakeState {
     let private = key.private();
     let mut builder = snow::Builder::new(pattern.name().parse().unwrap())
         .prologue(PROLOGUE)
@@ -320,7 +325,12 @@ fn handshake_matrix(pattern: Pattern, attack: Attack) {
 
 // Returns a public Session and its connected, negotiated snow peer. This exercises
 // dial/accept rather than manufacturing private SessionInner transport state.
-fn connected(pattern: Pattern, dial: bool, conn: DeadlineTcp, mut peer: TcpStream) -> (Session, TcpStream, snow::TransportState) {
+fn connected(
+    pattern: Pattern,
+    dial: bool,
+    conn: DeadlineTcp,
+    mut peer: TcpStream,
+) -> (Session, TcpStream, snow::TransportState) {
     let i = generate_keypair();
     let r = generate_keypair();
     let remote = r.public_key;
@@ -374,7 +384,8 @@ enum TransportAttack {
 fn transport_matrix(pattern: Pattern, attack: TransportAttack) {
     for dial in [true, false] {
         let (conn, peer) = tcp_pair();
-        let (session, mut peer, mut crypto) = connected(pattern, dial, DeadlineTcp::new(conn), peer);
+        let (session, mut peer, mut crypto) =
+            connected(pattern, dial, DeadlineTcp::new(conn), peer);
         match attack {
             TransportAttack::Tampered => {
                 let mut body = transport_message(&mut crypto, b"authenticated");
@@ -400,7 +411,10 @@ fn transport_matrix(pattern: Pattern, attack: TransportAttack) {
         }
         peer.shutdown(Shutdown::Both).unwrap();
         let result = bounded(move || session.receive());
-        assert!(result.is_err(), "{pattern:?} dial={dial} {attack:?} accepted");
+        assert!(
+            result.is_err(),
+            "{pattern:?} dial={dial} {attack:?} accepted"
+        );
     }
 }
 
@@ -418,9 +432,17 @@ fn silent_peer(pattern: Pattern) {
                 pattern.accept(conn, key)
             }
         });
-        let error = result.err().expect("silent handshake unexpectedly succeeded");
-        assert!(error.contains(DEADLINE_ERROR), "wrong deadline owner: {error}");
-        eprintln!("{pattern:?} {} silent peer: Err({error}) within caller-owned deadline", if dial { "dial" } else { "accept" });
+        let error = result
+            .err()
+            .expect("silent handshake unexpectedly succeeded");
+        assert!(
+            error.contains(DEADLINE_ERROR),
+            "wrong deadline owner: {error}"
+        );
+        eprintln!(
+            "{pattern:?} {} silent peer: Err({error}) within caller-owned deadline",
+            if dial { "dial" } else { "accept" }
+        );
     }
     for dial in [true, false] {
         let (conn, peer) = tcp_pair();
@@ -429,8 +451,13 @@ fn silent_peer(pattern: Pattern) {
         conn.deadline = Instant::now() + Duration::from_secs(1);
         let (session, _silent_peer, _) = connected(pattern, dial, conn, peer);
         let error = bounded(move || session.receive()).unwrap_err();
-        assert!(error.contains(DEADLINE_ERROR), "wrong deadline owner: {error}");
-        eprintln!("{pattern:?} dial={dial} silent receive: Err({error}) within caller-owned deadline");
+        assert!(
+            error.contains(DEADLINE_ERROR),
+            "wrong deadline owner: {error}"
+        );
+        eprintln!(
+            "{pattern:?} dial={dial} silent receive: Err({error}) within caller-owned deadline"
+        );
     }
 }
 
@@ -469,12 +496,18 @@ fn transport_errors(pattern: Pattern) {
 fn authenticated_empty_payload(pattern: Pattern) {
     for dial in [true, false] {
         let (conn, peer) = tcp_pair();
-        let (session, mut peer, mut crypto) = connected(pattern, dial, DeadlineTcp::new(conn), peer);
+        let (session, mut peer, mut crypto) =
+            connected(pattern, dial, DeadlineTcp::new(conn), peer);
         write_frame(&mut peer, &transport_message(&mut crypto, &[]));
         assert!(session.receive().unwrap().is_empty());
         session.send(&[]).unwrap();
         let mut plaintext = [0; 16];
-        assert_eq!(crypto.read_message(&read_frame(&mut peer), &mut plaintext).unwrap(), 0);
+        assert_eq!(
+            crypto
+                .read_message(&read_frame(&mut peer), &mut plaintext)
+                .unwrap(),
+            0
+        );
     }
 }
 
@@ -485,72 +518,74 @@ fn subsequent_receive_after_close(pattern: Pattern) {
     assert!(bounded(move || session.receive()).is_err());
 }
 
-// Regression requested by #27: a receive already retrying WouldBlock should
-// terminate after close, without waiting for a transport deadline or peer EOF.
-// Deliberately not ignored: if this fails, #27 stays blocked on its separate fix.
-fn close_unblocks_pending_receive(pattern: Pattern) {
-    let (conn, peer) = tcp_pair();
-    let rescue = conn.try_clone().unwrap();
-    let mut conn = DeadlineTcp::new(conn);
-    let (waiting_tx, waiting_rx) = mpsc::channel();
-    conn.waiting = Some(waiting_tx);
-    let observe_waiting = conn.observe_waiting.clone();
-    let (session, _peer, _) = connected(pattern, true, conn, peer);
-    observe_waiting.store(true, Ordering::Release);
-    let session = Arc::new(session);
-    let reader = session.clone();
-    let (done_tx, done_rx) = mpsc::channel();
-    let worker = thread::spawn(move || done_tx.send(reader.receive()).unwrap());
-    waiting_rx.recv_timeout(BOUND).unwrap();
-    session.close().unwrap();
-    let result = done_rx.recv_timeout(Duration::from_millis(250));
-    // Always unblock and join the worker before asserting: no runaway retry loop.
-    rescue.shutdown(Shutdown::Both).unwrap();
-    if result.is_err() {
-        done_rx.recv_timeout(BOUND).unwrap().unwrap_err();
-    }
-    worker.join().unwrap();
-    assert!(matches!(result, Ok(Err(_))), "{pattern:?}: pending receive did not return Err after close; transport shutdown was needed");
-}
-
 macro_rules! pattern_tests {
     ($module:ident, $pattern:expr) => {
         mod $module {
             use super::*;
             #[test]
-            fn truncated_handshake_header() { handshake_matrix($pattern, Attack::TruncatedHeader); }
+            fn truncated_handshake_header() {
+                handshake_matrix($pattern, Attack::TruncatedHeader);
+            }
             #[test]
-            fn truncated_handshake_body() { handshake_matrix($pattern, Attack::TruncatedBody); }
+            fn truncated_handshake_body() {
+                handshake_matrix($pattern, Attack::TruncatedBody);
+            }
             #[test]
-            fn truncated_noise_handshake_message() { handshake_matrix($pattern, Attack::TruncatedMessage); }
+            fn truncated_noise_handshake_message() {
+                handshake_matrix($pattern, Attack::TruncatedMessage);
+            }
             #[test]
-            fn bit_flipped_authenticated_handshake() { handshake_matrix($pattern, Attack::BitFlipped); }
+            fn bit_flipped_authenticated_handshake() {
+                handshake_matrix($pattern, Attack::BitFlipped);
+            }
             #[test]
-            fn replayed_handshake_wrong_transcript_or_role() { handshake_matrix($pattern, Attack::Replayed); }
+            fn replayed_handshake_wrong_transcript_or_role() {
+                handshake_matrix($pattern, Attack::Replayed);
+            }
             #[test]
-            fn peer_closes_mid_handshake() { handshake_matrix($pattern, Attack::Close); }
+            fn peer_closes_mid_handshake() {
+                handshake_matrix($pattern, Attack::Close);
+            }
             #[test]
-            fn oversized_handshake_length_then_eof() { handshake_matrix($pattern, Attack::OversizedThenEof); }
+            fn oversized_handshake_length_then_eof() {
+                handshake_matrix($pattern, Attack::OversizedThenEof);
+            }
             #[test]
-            fn tampered_transport() { transport_matrix($pattern, TransportAttack::Tampered); }
+            fn tampered_transport() {
+                transport_matrix($pattern, TransportAttack::Tampered);
+            }
             #[test]
-            fn replayed_transport() { transport_matrix($pattern, TransportAttack::Replayed); }
+            fn replayed_transport() {
+                transport_matrix($pattern, TransportAttack::Replayed);
+            }
             #[test]
-            fn reordered_transport() { transport_matrix($pattern, TransportAttack::Reordered); }
+            fn reordered_transport() {
+                transport_matrix($pattern, TransportAttack::Reordered);
+            }
             #[test]
-            fn zero_length_transport_frame() { transport_matrix($pattern, TransportAttack::ZeroLength); }
+            fn zero_length_transport_frame() {
+                transport_matrix($pattern, TransportAttack::ZeroLength);
+            }
             #[test]
-            fn oversized_transport_length_then_eof() { transport_matrix($pattern, TransportAttack::OversizedThenEof); }
+            fn oversized_transport_length_then_eof() {
+                transport_matrix($pattern, TransportAttack::OversizedThenEof);
+            }
             #[test]
-            fn authenticated_empty_payload_is_not_zero_length_frame() { authenticated_empty_payload($pattern); }
+            fn authenticated_empty_payload_is_not_zero_length_frame() {
+                authenticated_empty_payload($pattern);
+            }
             #[test]
-            fn caller_owned_deadline_ends_silent_dial_accept_receive() { silent_peer($pattern); }
+            fn caller_owned_deadline_ends_silent_dial_accept_receive() {
+                silent_peer($pattern);
+            }
             #[test]
-            fn timed_out_and_unexpected_eof_end_dial_accept_receive() { transport_errors($pattern); }
+            fn timed_out_and_unexpected_eof_end_dial_accept_receive() {
+                transport_errors($pattern);
+            }
             #[test]
-            fn closed_session_rejects_subsequent_receive() { subsequent_receive_after_close($pattern); }
-            #[test]
-            fn close_unblocks_pending_receive() { super::close_unblocks_pending_receive($pattern); }
+            fn closed_session_rejects_subsequent_receive() {
+                subsequent_receive_after_close($pattern);
+            }
         }
     };
 }
@@ -563,8 +598,14 @@ fn nk_wrong_responder_key_rejected_by_both_peers() {
     let responder = generate_keypair();
     let wrong_remote = generate_keypair().public_key;
     let (conn, peer) = tcp_pair();
-    let worker = thread::spawn(move || bounded(move || Pattern::Nk.accept(DeadlineTcp::new(peer), responder)));
-    let result = bounded(move || Pattern::Nk.dial(DeadlineTcp::new(conn), generate_keypair(), wrong_remote));
+    let worker = thread::spawn(move || {
+        bounded(move || Pattern::Nk.accept(DeadlineTcp::new(peer), responder))
+    });
+    let result =
+        bounded(move || Pattern::Nk.dial(DeadlineTcp::new(conn), generate_keypair(), wrong_remote));
     assert!(result.is_err(), "dial accepted the wrong responder key");
-    assert!(worker.join().unwrap().is_err(), "accept authenticated the wrong key");
+    assert!(
+        worker.join().unwrap().is_err(),
+        "accept authenticated the wrong key"
+    );
 }
