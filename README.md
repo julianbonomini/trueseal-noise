@@ -139,7 +139,8 @@ session.remote_public_key()   -> [u8; 32]
 ```
 
 **Limits**
-- Max plaintext per message: **65,519 bytes** (65,535 frame − 16-byte AEAD tag). Larger payloads return `Err`.
+- Max plaintext per message: **65,519 bytes**. The frame length prefix is a u16, so a frame holds at most 65,535 bytes, and the 16-byte AEAD tag takes 16 of them. `send` returns `Err` for a larger payload and writes nothing; the session stays usable. Rust callers can read the value as `trueseal_noise::MAX_PLAINTEXT_SIZE`.
+- trueseal-sync derives its Envelope limit and its 61,440-byte Protocol Size Limit from this ceiling, and the relay's envelope ceiling follows from it ([trueseal-sync ADR-0025](https://github.com/julianbonomini/trueseal-sync/blob/main/docs/adr/0025-single-frame-size-limit.md)). Raising it means widening the length prefix, which needs a Transport Version bump.
 - `send` and `receive` are safe to call concurrently on the same session.
 - All I/O is **blocking**. Wrap in a thread or `spawn_blocking` if you need async.
 - Sessions are not resumable after `close()`.

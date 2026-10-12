@@ -20,4 +20,7 @@ pub(crate) mod test_helpers;
 // find them without qualification.
 pub use ffi::*;
 
+/// Largest plaintext a single `send` accepts (65,519 bytes). See README "Limits".
+pub use framing::MAX_PLAINTEXT_SIZE;
+
 uniffi::include_scaffolding!("trueseal_noise");

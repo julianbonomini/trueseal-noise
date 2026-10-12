@@ -8,6 +8,8 @@ Release tags are `vX.Y.Z`. They are immutable: a bad release is fixed with a new
 - The release workflow fails a tag push when the tag version differs from the `version` in Cargo.toml (`scripts/check-tag-version.sh`).
 - The README describes the XX Receive Session and NK Push Session between a device and the relay, replacing a claim that XX runs between devices.
 - ADR-0005 is marked superseded. The Rust crate is the only implementation, and trueseal-relay uses `github.com/flynn/noise`.
+- **Breaking:** XX and NK `dial`/`accept` (Rust) and `dial_xx`/`accept_xx`/`dial_nk`/`accept_nk` (UniFFI) take a `prologue` argument, which is mixed into the Noise handshake hash. Both peers must pass identical bytes or the handshake fails on both sides. The caller owns the contents, such as the Transport Version prefix (trueseal-sync ADR-0022). Pass an empty prologue to bind nothing.
+- `trueseal_noise::MAX_PLAINTEXT_SIZE` (65,519 bytes) is now public. README and CONTEXT.md state the u16 frame ceiling (65,535 bytes) and the 16-byte AEAD tag it comes from (trueseal-sync ADR-0025).
 
 The next release is planned as 0.2.0, the first tag where the Cargo version and the tag must match.
 
