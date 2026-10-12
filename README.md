@@ -17,20 +17,25 @@ Two patterns. Pick one before you dial.
 | Initiator authenticates | ✓ | ✗ (anonymous) |
 | Responder authenticates | ✓ | ✓ |
 | Initiator needs responder's key upfront | ✗ | ✓ |
-| After handshake: `remote_public_key()` | both sides | responder side only |
-| Typical use | device ↔ device | device → relay / client → server |
+| After handshake: `remote_public_key()` | both sides | not exposed (the initiator already has the key; the responder never learns one) |
+| Use in TrueSeal | Receive Session (device ↔ relay) | Push Session (device → relay) |
 
-In the trueseal stack: XX is used between devices (trueseal-sync pairing and sync); NK is used for device-to-relay sessions (trueseal-relay push/receive).
+In the TrueSeal stack, devices never open Noise sessions to each other. Every session runs between a device and trueseal-relay:
+
+- **Receive Session (XX).** Long-lived. The device authenticates with its stable noise keypair, and the relay delivers that device's inbound Blobs over it.
+- **Push Session (NK).** Short-lived. The device uses a fresh ephemeral keypair for each push, so the handshake proves nothing about the sender. The device checks the relay's static key.
+
+End-to-end encryption between devices is done by trueseal-sync above this layer, not by these sessions. See the [Threat Model](https://trueseal.dev/docs/trust/threat-model) for which properties TrueSeal claims and which it doesn't.
 
 ---
 
 ## Install
 
-Not yet published to crates.io. Add via path or git:
+Not published to crates.io. Depend on a release tag:
 
 ```toml
 [dependencies]
-trueseal-noise = { path = "../trueseal-noise/rust" }
+trueseal-noise = { git = "https://github.com/julianbonomini/trueseal-noise", tag = "vX.Y.Z" }
 ```
 
 ---

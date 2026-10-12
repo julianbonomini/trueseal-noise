@@ -5,7 +5,7 @@ A Rust implementation of the Noise Protocol Framework — a reusable encrypted t
 ## Language
 
 **Portable Implementation**:
-The Rust crate (`rust/`). Compiles to iOS, Android, macOS, Linux, and WASM as a static library. Exposes Swift and Kotlin bindings via UniFFI. Verified against the official Test Vectors for `Noise_XX_25519_ChaChaPoly_BLAKE2s` and `Noise_NK_25519_ChaChaPoly_BLAKE2s`.
+The Rust crate at the repo root. Compiles to iOS, Android, macOS, Linux, and WASM as a static library. Exposes Swift and Kotlin bindings via UniFFI. Verified against the official Test Vectors for `Noise_XX_25519_ChaChaPoly_BLAKE2s` and `Noise_NK_25519_ChaChaPoly_BLAKE2s`.
 _Avoid_: mobile implementation, cross-platform version
 
 **UniFFI**:
