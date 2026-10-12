@@ -67,3 +67,15 @@ pub(crate) fn mem_pipe_pair() -> (MemPipe, MemPipe) {
         },
     )
 }
+
+/// Returns a connected pair of loopback TCP streams.
+///
+/// Unlike `mem_pipe_pair`, dropping one end makes reads on the other end
+/// return EOF, so a peer that aborts a handshake unblocks its counterpart.
+pub(crate) fn tcp_pair() -> (std::net::TcpStream, std::net::TcpStream) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let addr = listener.local_addr().expect("local addr");
+    let client = std::net::TcpStream::connect(addr).expect("connect loopback");
+    let (server, _) = listener.accept().expect("accept loopback");
+    (client, server)
+}

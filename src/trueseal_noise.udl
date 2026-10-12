@@ -14,30 +14,40 @@ namespace trueseal_noise {
     KeypairRecord new_keypair([ByRef] sequence<u8> private_key, [ByRef] sequence<u8> public_key);
 
     /// Perform the XX handshake as the Initiator.
+    /// `prologue` is mixed into the handshake hash; both peers must pass
+    /// byte-identical prologues or the handshake fails on both sides. The
+    /// caller owns its contents (for example a version prefix). Pass an
+    /// empty sequence for no prologue.
     /// Blocks until the three-message handshake completes.
     /// Returns a fully-negotiated SessionXx on success.
     [Throws=NoiseError]
-    SessionXx dial_xx(NoiseTransport transport, KeypairRecord keypair);
+    SessionXx dial_xx(NoiseTransport transport, KeypairRecord keypair, [ByRef] sequence<u8> prologue);
 
     /// Perform the XX handshake as the Responder.
+    /// `prologue` must be byte-identical to the Initiator's.
     /// Blocks until the three-message handshake completes.
     /// Returns a fully-negotiated SessionXx on success.
     [Throws=NoiseError]
-    SessionXx accept_xx(NoiseTransport transport, KeypairRecord keypair);
+    SessionXx accept_xx(NoiseTransport transport, KeypairRecord keypair, [ByRef] sequence<u8> prologue);
 
     /// Perform the NK handshake as the Initiator.
     /// `remote_static` is the Responder's known static public key — must be
     /// supplied before calling dial_nk.
+    /// `prologue` is mixed into the handshake hash; both peers must pass
+    /// byte-identical prologues or the handshake fails on both sides. The
+    /// caller owns its contents (for example a version prefix). Pass an
+    /// empty sequence for no prologue.
     /// Blocks until the two-message handshake completes.
     /// Returns a fully-negotiated SessionNk on success.
     [Throws=NoiseError]
-    SessionNk dial_nk(NoiseTransport transport, KeypairRecord keypair, sequence<u8> remote_static);
+    SessionNk dial_nk(NoiseTransport transport, KeypairRecord keypair, sequence<u8> remote_static, [ByRef] sequence<u8> prologue);
 
     /// Perform the NK handshake as the Responder.
+    /// `prologue` must be byte-identical to the Initiator's.
     /// Blocks until the two-message handshake completes.
     /// Returns a fully-negotiated SessionNk on success.
     [Throws=NoiseError]
-    SessionNk accept_nk(NoiseTransport transport, KeypairRecord keypair);
+    SessionNk accept_nk(NoiseTransport transport, KeypairRecord keypair, [ByRef] sequence<u8> prologue);
 };
 
 /// A static X25519 keypair. public_key is safe to share freely.

@@ -191,9 +191,10 @@ impl SessionNk {
 pub fn dial_xx(
     transport: Arc<dyn NoiseTransport>,
     keypair: KeypairRecord,
+    prologue: &[u8],
 ) -> Result<Arc<SessionXx>, NoiseError> {
     let wrapper = TransportWrapper { inner: transport };
-    let core = core_dial_xx(wrapper, keypair.to_keypair()?).map_err(NoiseError::from)?;
+    let core = core_dial_xx(wrapper, keypair.to_keypair()?, prologue).map_err(NoiseError::from)?;
     Ok(Arc::new(SessionXx {
         inner: Arc::new(core),
     }))
@@ -202,9 +203,11 @@ pub fn dial_xx(
 pub fn accept_xx(
     transport: Arc<dyn NoiseTransport>,
     keypair: KeypairRecord,
+    prologue: &[u8],
 ) -> Result<Arc<SessionXx>, NoiseError> {
     let wrapper = TransportWrapper { inner: transport };
-    let core = core_accept_xx(wrapper, keypair.to_keypair()?).map_err(NoiseError::from)?;
+    let core =
+        core_accept_xx(wrapper, keypair.to_keypair()?, prologue).map_err(NoiseError::from)?;
     Ok(Arc::new(SessionXx {
         inner: Arc::new(core),
     }))
@@ -216,6 +219,7 @@ pub fn dial_nk(
     transport: Arc<dyn NoiseTransport>,
     keypair: KeypairRecord,
     remote_static: Vec<u8>,
+    prologue: &[u8],
 ) -> Result<Arc<SessionNk>, NoiseError> {
     if remote_static.len() != 32 {
         return Err(NoiseError::Transport {
@@ -228,7 +232,8 @@ pub fn dial_nk(
     let mut rs = [0u8; 32];
     rs.copy_from_slice(&remote_static);
     let wrapper = TransportWrapper { inner: transport };
-    let core = core_dial_nk(wrapper, keypair.to_keypair()?, rs).map_err(NoiseError::from)?;
+    let core =
+        core_dial_nk(wrapper, keypair.to_keypair()?, rs, prologue).map_err(NoiseError::from)?;
     Ok(Arc::new(SessionNk {
         inner: Arc::new(core),
     }))
@@ -237,9 +242,11 @@ pub fn dial_nk(
 pub fn accept_nk(
     transport: Arc<dyn NoiseTransport>,
     keypair: KeypairRecord,
+    prologue: &[u8],
 ) -> Result<Arc<SessionNk>, NoiseError> {
     let wrapper = TransportWrapper { inner: transport };
-    let core = core_accept_nk(wrapper, keypair.to_keypair()?).map_err(NoiseError::from)?;
+    let core =
+        core_accept_nk(wrapper, keypair.to_keypair()?, prologue).map_err(NoiseError::from)?;
     Ok(Arc::new(SessionNk {
         inner: Arc::new(core),
     }))
@@ -250,6 +257,102 @@ pub fn accept_nk(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers::tcp_pair;
+    use std::net::TcpStream;
+    use std::sync::Mutex;
+
+    /// NoiseTransport over a loopback TCP stream, as a foreign caller would
+    /// implement it.
+    struct TcpTransport(Mutex<TcpStream>);
+
+    impl NoiseTransport for TcpTransport {
+        fn read(&self, count: u64) -> Result<Vec<u8>, NoiseError> {
+            let mut buf = vec![0u8; count as usize];
+            self.0
+                .lock()
+                .unwrap()
+                .read_exact(&mut buf)
+                .map_err(|e| NoiseError::Transport {
+                    message: e.to_string(),
+                })?;
+            Ok(buf)
+        }
+        fn write(&self, data: Vec<u8>) -> Result<(), NoiseError> {
+            self.0
+                .lock()
+                .unwrap()
+                .write_all(&data)
+                .map_err(|e| NoiseError::Transport {
+                    message: e.to_string(),
+                })
+        }
+    }
+
+    fn transports() -> (Arc<dyn NoiseTransport>, Arc<dyn NoiseTransport>) {
+        let (a, b) = tcp_pair();
+        (
+            Arc::new(TcpTransport(Mutex::new(a))),
+            Arc::new(TcpTransport(Mutex::new(b))),
+        )
+    }
+
+    fn xx(
+        i_prologue: &'static [u8],
+        r_prologue: &'static [u8],
+    ) -> (
+        Result<Arc<SessionXx>, NoiseError>,
+        Result<Arc<SessionXx>, NoiseError>,
+    ) {
+        let (i_t, r_t) = transports();
+        let r = std::thread::spawn(move || accept_xx(r_t, generate_keypair(), r_prologue));
+        let i = dial_xx(i_t, generate_keypair(), i_prologue);
+        (i, r.join().unwrap())
+    }
+
+    fn nk(
+        i_prologue: &'static [u8],
+        r_prologue: &'static [u8],
+    ) -> (
+        Result<Arc<SessionNk>, NoiseError>,
+        Result<Arc<SessionNk>, NoiseError>,
+    ) {
+        let (i_t, r_t) = transports();
+        let r_kp = generate_keypair();
+        let r_pub = r_kp.public_key.clone();
+        let r = std::thread::spawn(move || accept_nk(r_t, r_kp, r_prologue));
+        let i = dial_nk(i_t, generate_keypair(), r_pub, i_prologue);
+        (i, r.join().unwrap())
+    }
+
+    #[test]
+    fn ffi_xx_matching_prologue_completes() {
+        let (i, r) = xx(b"v1", b"v1");
+        let (i, r) = (i.expect("dial_xx"), r.expect("accept_xx"));
+        i.send(b"ffi").expect("send");
+        assert_eq!(r.receive().expect("receive"), b"ffi");
+    }
+
+    #[test]
+    fn ffi_xx_prologue_mismatch_fails_on_both_sides() {
+        let (i, r) = xx(b"v1", b"v2");
+        assert!(i.is_err(), "dial_xx must fail");
+        assert!(r.is_err(), "accept_xx must fail");
+    }
+
+    #[test]
+    fn ffi_nk_matching_prologue_completes() {
+        let (i, r) = nk(b"v1", b"v1");
+        let (i, r) = (i.expect("dial_nk"), r.expect("accept_nk"));
+        i.send(b"ffi").expect("send");
+        assert_eq!(r.receive().expect("receive"), b"ffi");
+    }
+
+    #[test]
+    fn ffi_nk_prologue_mismatch_fails_on_both_sides() {
+        let (i, r) = nk(b"v1", b"v2");
+        assert!(i.is_err(), "dial_nk must fail");
+        assert!(r.is_err(), "accept_nk must fail");
+    }
 
     #[test]
     fn to_keypair_rejects_short_private_key() {
