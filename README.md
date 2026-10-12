@@ -17,7 +17,7 @@ Two patterns. Pick one before you dial.
 | Initiator authenticates | ✓ | ✗ (anonymous) |
 | Responder authenticates | ✓ | ✓ |
 | Initiator needs responder's key upfront | ✗ | ✓ |
-| After handshake: `remote_public_key()` | both sides | responder side only |
+| After handshake: `remote_public_key()` | both sides | not exposed (the initiator already has the key; the responder never learns one) |
 | Use in TrueSeal | Receive Session (device ↔ relay) | Push Session (device → relay) |
 
 In the TrueSeal stack, devices never open Noise sessions to each other. Every session runs between a device and trueseal-relay:
@@ -31,11 +31,11 @@ End-to-end encryption between devices is done by trueseal-sync above this layer,
 
 ## Install
 
-Not yet published to crates.io. Add via path or git:
+Not published to crates.io. Depend on a release tag:
 
 ```toml
 [dependencies]
-trueseal-noise = { path = "../trueseal-noise/rust" }
+trueseal-noise = { git = "https://github.com/julianbonomini/trueseal-noise", tag = "vX.Y.Z" }
 ```
 
 ---
