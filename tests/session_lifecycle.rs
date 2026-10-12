@@ -445,7 +445,7 @@ fn close_partial_and_queued_receives(pattern: Pattern) {
                 let interrupt = conn.interrupt_reads.clone();
                 let (session, mut peer, mut transport) = connected(pattern, dial, conn, peer);
                 let session = Arc::new(session);
-                let mut frame = vec![0; 64];
+                let mut frame = [0; 64];
                 let n = transport
                     .write_message(b"partial frame", &mut frame[2..])
                     .unwrap();
