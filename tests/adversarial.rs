@@ -233,11 +233,19 @@ fn bounded<T: Send + 'static>(operation: impl FnOnce() -> T + Send + 'static) ->
     let worker = thread::spawn(move || {
         tx.send(operation()).unwrap();
     });
-    let result = rx.recv_timeout(BOUND + Duration::from_secs(1));
-    if result.is_ok() {
-        worker.join().expect("public operation panicked");
+    match rx.recv_timeout(BOUND + Duration::from_secs(1)) {
+        Ok(result) => {
+            worker.join().expect("public operation panicked");
+            result
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            worker.join().expect("public operation panicked");
+            panic!("public operation ended without returning a result");
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            panic!("public operation did not finish within caller deadline");
+        }
     }
-    result.expect("public operation did not finish within caller deadline")
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -248,10 +256,17 @@ enum Attack {
     BitFlipped,
     Replayed,
     Close,
-    OversizedThenEof,
+    DeclaredLengthThenEof,
+    ReadError(ErrorKind, usize),
 }
 
-fn attack_frame(peer: &mut TcpStream, mut body: Vec<u8>, attack: Attack, replay: &[u8]) {
+fn attack_frame(
+    peer: &mut TcpStream,
+    mut body: Vec<u8>,
+    attack: Attack,
+    replay: &[u8],
+    failure: &ReadFailure,
+) {
     match attack {
         Attack::TruncatedHeader => peer.write_all(&[0]).unwrap(),
         Attack::TruncatedBody => {
@@ -268,9 +283,25 @@ fn attack_frame(peer: &mut TcpStream, mut body: Vec<u8>, attack: Attack, replay:
         }
         Attack::Replayed => write_frame(peer, replay),
         Attack::Close => (),
-        Attack::OversizedThenEof => peer.write_all(&[0xff, 0xff, 1, 2, 3]).unwrap(),
+        Attack::DeclaredLengthThenEof => peer.write_all(&[0xff, 0xff, 1, 2, 3]).unwrap(),
+        Attack::ReadError(kind, after) => {
+            failure.arm(kind, after);
+            let header = (body.len() as u16).to_be_bytes();
+            let prefix = [header[0], header[1], body[0]];
+            peer.write_all(&prefix[..after]).unwrap();
+        }
     }
-    peer.shutdown(Shutdown::Both).unwrap();
+    // Complete hostile messages must fail parsing/authentication, not a later
+    // write to a closed peer. Only attacks that require EOF close the socket.
+    if matches!(
+        attack,
+        Attack::TruncatedHeader
+            | Attack::TruncatedBody
+            | Attack::Close
+            | Attack::DeclaredLengthThenEof
+    ) {
+        peer.shutdown(Shutdown::Write).unwrap();
+    }
 }
 
 fn rejected_handshake(pattern: Pattern, dial: bool, attack: Attack, final_xx: bool) {
@@ -278,6 +309,8 @@ fn rejected_handshake(pattern: Pattern, dial: bool, attack: Attack, final_xx: bo
     let r = generate_keypair();
     let old = transcript(pattern, &i, &r);
     let (conn, mut peer) = tcp_pair();
+    let conn = DeadlineTcp::new(conn);
+    let failure = conn.read_error.clone();
     let public_key = r.public_key;
     let mut hs = if dial {
         handshake(pattern, false, &r, &i)
@@ -287,9 +320,9 @@ fn rejected_handshake(pattern: Pattern, dial: bool, attack: Attack, final_xx: bo
     let worker = thread::spawn(move || {
         bounded(move || {
             if dial {
-                pattern.dial(DeadlineTcp::new(conn), i, public_key)
+                pattern.dial(conn, i, public_key)
             } else {
-                pattern.accept(DeadlineTcp::new(conn), r)
+                pattern.accept(conn, r)
             }
         })
     });
@@ -306,13 +339,41 @@ fn rejected_handshake(pattern: Pattern, dial: bool, attack: Attack, final_xx: bo
         // is not intrinsically invalid; Noise has no handshake replay cache.
         (message(&mut hs), &old[1])
     };
-    attack_frame(&mut peer, body, attack, replay);
+    attack_frame(&mut peer, body, attack, replay, &failure);
     let result = worker.join().expect("handshake panicked");
-    assert!(
-        result.is_err(),
-        "{pattern:?} {} {attack:?} unexpectedly completed",
-        if dial { "dial" } else { "accept" }
-    );
+    let error = result.err().unwrap_or_else(|| {
+        panic!(
+            "{pattern:?} {} {attack:?} unexpectedly completed",
+            if dial { "dial" } else { "accept" }
+        )
+    });
+    let step = if dial {
+        1
+    } else if final_xx {
+        2
+    } else {
+        0
+    };
+    let phase = format!("noise: read msg{step}: ");
+    assert!(error.starts_with(&phase), "wrong rejection phase: {error}");
+    match attack {
+        Attack::TruncatedMessage | Attack::BitFlipped | Attack::Replayed => {
+            let expected = if matches!(attack, Attack::TruncatedMessage)
+                && matches!(pattern, Pattern::Xx)
+                && step == 0
+            {
+                snow::Error::Input
+            } else {
+                snow::Error::Decrypt
+            };
+            assert_eq!(error, format!("{phase}{expected:?}"));
+        }
+        Attack::ReadError(_, _) => {
+            assert!(error.contains("injected caller read failure"), "{error}");
+            assert_eq!(failure.after.load(Ordering::Acquire), 0);
+        }
+        _ => assert!(!error.contains(DEADLINE_ERROR), "expected EOF: {error}"),
+    }
 }
 
 fn handshake_matrix(pattern: Pattern, attack: Attack) {
@@ -378,7 +439,7 @@ enum TransportAttack {
     Replayed,
     Reordered,
     ZeroLength,
-    OversizedThenEof,
+    DeclaredLengthThenEof,
 }
 
 fn transport_matrix(pattern: Pattern, attack: TransportAttack) {
@@ -405,15 +466,24 @@ fn transport_matrix(pattern: Pattern, attack: TransportAttack) {
                 write_frame(&mut peer, &first);
             }
             TransportAttack::ZeroLength => write_frame(&mut peer, &[]),
-            TransportAttack::OversizedThenEof => {
+            TransportAttack::DeclaredLengthThenEof => {
                 peer.write_all(&[0xff, 0xff, 1, 2, 3]).unwrap();
             }
         }
-        peer.shutdown(Shutdown::Both).unwrap();
-        let result = bounded(move || session.receive());
+        let expected_phase = if matches!(attack, TransportAttack::DeclaredLengthThenEof) {
+            peer.shutdown(Shutdown::Write).unwrap();
+            "noise: receive body: "
+        } else {
+            "noise: decrypt: "
+        };
+        let error = bounded(move || session.receive()).unwrap_err();
         assert!(
-            result.is_err(),
-            "{pattern:?} dial={dial} {attack:?} accepted"
+            error.starts_with(expected_phase),
+            "{pattern:?} dial={dial} {attack:?} wrong rejection: {error}"
+        );
+        assert!(
+            !error.contains(DEADLINE_ERROR),
+            "unexpected deadline: {error}"
         );
     }
 }
@@ -464,20 +534,12 @@ fn silent_peer(pattern: Pattern) {
 fn transport_errors(pattern: Pattern) {
     for kind in [ErrorKind::TimedOut, ErrorKind::UnexpectedEof] {
         for dial in [true, false] {
-            let (conn, _peer) = tcp_pair();
-            let conn = DeadlineTcp::new(conn);
-            conn.read_error.arm(kind, 0);
-            let key = generate_keypair();
-            let remote = generate_keypair().public_key;
-            let result = bounded(move || {
-                if dial {
-                    pattern.dial(conn, key, remote)
-                } else {
-                    pattern.accept(conn, key)
+            for after in [0, 1, 2, 3] {
+                rejected_handshake(pattern, dial, Attack::ReadError(kind, after), false);
+                if matches!(pattern, Pattern::Xx) && !dial {
+                    rejected_handshake(pattern, dial, Attack::ReadError(kind, after), true);
                 }
-            });
-            let error = result.err().expect("handshake ignored terminal read error");
-            assert!(error.contains("injected caller read failure"), "{error}");
+            }
 
             for after in [0, 1, 2, 3] {
                 let (conn, peer) = tcp_pair();
@@ -488,6 +550,13 @@ fn transport_errors(pattern: Pattern) {
                 failure.arm(kind, after);
                 let error = bounded(move || session.receive()).unwrap_err();
                 assert!(error.contains("injected caller read failure"), "{error}");
+                let phase = if after < 2 {
+                    "noise: receive header: "
+                } else {
+                    "noise: receive body: "
+                };
+                assert!(error.starts_with(phase), "wrong read boundary: {error}");
+                assert_eq!(failure.after.load(Ordering::Acquire), 0);
             }
         }
     }
@@ -547,8 +616,8 @@ macro_rules! pattern_tests {
                 handshake_matrix($pattern, Attack::Close);
             }
             #[test]
-            fn oversized_handshake_length_then_eof() {
-                handshake_matrix($pattern, Attack::OversizedThenEof);
+            fn declared_handshake_length_then_partial_body_eof() {
+                handshake_matrix($pattern, Attack::DeclaredLengthThenEof);
             }
             #[test]
             fn tampered_transport() {
@@ -567,8 +636,8 @@ macro_rules! pattern_tests {
                 transport_matrix($pattern, TransportAttack::ZeroLength);
             }
             #[test]
-            fn oversized_transport_length_then_eof() {
-                transport_matrix($pattern, TransportAttack::OversizedThenEof);
+            fn declared_transport_length_then_partial_body_eof() {
+                transport_matrix($pattern, TransportAttack::DeclaredLengthThenEof);
             }
             #[test]
             fn authenticated_empty_payload_is_not_zero_length_frame() {
@@ -603,9 +672,13 @@ fn nk_wrong_responder_key_rejected_by_both_peers() {
     });
     let result =
         bounded(move || Pattern::Nk.dial(DeadlineTcp::new(conn), generate_keypair(), wrong_remote));
-    assert!(result.is_err(), "dial accepted the wrong responder key");
-    assert!(
-        worker.join().unwrap().is_err(),
-        "accept authenticated the wrong key"
-    );
+    let dial_error = result.err().expect("dial accepted the wrong responder key");
+    let accept_error = worker
+        .join()
+        .expect("accept panicked")
+        .err()
+        .expect("accept authenticated the wrong key");
+    assert_eq!(accept_error, "noise: read msg0: Decrypt");
+    assert!(dial_error.starts_with("noise: read msg1: "), "{dial_error}");
+    assert!(!dial_error.contains(DEADLINE_ERROR), "{dial_error}");
 }
