@@ -52,13 +52,13 @@ let responder_kp = generate_keypair();
 let r_kp = Keypair::new(responder_kp.private(), responder_kp.public_key);
 let r_handle = thread::spawn(move || {
     let (conn, _) = listener.accept().unwrap();
-    accept(conn, r_kp).expect("responder handshake failed")
+    accept(conn, r_kp, b"my-app v1").expect("responder handshake failed")
 });
 
 // --- initiator (another thread / process) ---
 let initiator_kp = generate_keypair();
 let conn = TcpStream::connect("127.0.0.1:7700").unwrap();
-let i_session = dial(conn, initiator_kp).expect("initiator handshake failed");
+let i_session = dial(conn, initiator_kp, b"my-app v1").expect("initiator handshake failed");
 let r_session = r_handle.join().unwrap();
 
 // Both sides have the other's authenticated static key.
@@ -81,15 +81,23 @@ use trueseal_noise::session_nk::{dial, accept};
 
 // --- initiator ---
 // Must supply the responder's known static public key.
-let i_session = dial(conn, initiator_kp, responder_pub_key).expect("dial failed");
+let i_session = dial(conn, initiator_kp, responder_pub_key, b"my-app v1").expect("dial failed");
 
 // --- responder ---
 // No remote_public_key() — initiator identity is not proven.
-let r_session = accept(conn, responder_kp).expect("accept failed");
+let r_session = accept(conn, responder_kp, b"my-app v1").expect("accept failed");
 
 i_session.send(b"hello").unwrap();
 let msg = r_session.receive().unwrap();
 ```
+
+---
+
+## Prologue
+
+Every `dial` and `accept` takes a `prologue: &[u8]` (a `sequence<u8>` over UniFFI). The bytes are mixed into the Noise handshake hash, so both peers must pass identical prologues. If they differ by even one byte, the handshake fails on both sides and no `Session` is returned. Pass `&[]` if you have nothing to bind.
+
+The library only binds the bytes. It does not write them to the wire, parse them or check them against anything. The caller owns the contents. In TrueSeal, trueseal-sync and trueseal-relay exchange a short plaintext Transport Version prefix before the handshake, check it themselves, and pass the same bytes as the prologue (sync ADR-0022). A man-in-the-middle that rewrites the prefix then breaks the handshake instead of silently downgrading it.
 
 ---
 
@@ -138,6 +146,7 @@ session.remote_public_key()   -> [u8; 32]
 - **Forward secrecy** — session keys come from ephemeral DH. Compromise of a long-term keypair does not decrypt past sessions.
 - **Mutual authentication (XX)** — `remote_public_key()` is the peer's authenticated static key. Neither side can be impersonated. What you do with that key is up to you.
 - **Anonymous initiator (NK)** — the responder learns nothing about the initiator's identity.
+- **Prologue binding** — both peers' handshake hashes cover the prologue, so a handshake only completes if both sides passed the same bytes. This authenticates the prologue; it does not hide it or decide what it should contain.
 - **Cipher suite** — ChaCha20-Poly1305 + BLAKE2s + X25519. Constant-time on all platforms; no hardware AES dependency.
 
 ---
@@ -148,7 +157,7 @@ session.remote_public_key()   -> [u8; 32]
 cargo test --test cacophony
 ```
 
-Runs every `Noise_NK` and `Noise_XX` message from the Cacophony suite byte-for-byte, including handshake hash verification. Passing these means interoperability with any other spec-compliant Noise implementation, not just internal self-consistency.
+Runs every `Noise_NK` and `Noise_XX` message from the Cacophony suite byte-for-byte, including handshake hash verification. The vectors use a non-empty prologue. `cargo test prologue_vectors` also drives them through `dial`/`accept`: transport ciphertexts match the vectors byte-for-byte, `dial`/`accept` interoperate with a peer configured from the vector, and a one-byte prologue change makes that handshake fail. Passing these means interoperability with any other spec-compliant Noise implementation, not just internal self-consistency.
 
 ---
 

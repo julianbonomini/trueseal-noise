@@ -56,6 +56,10 @@ _Avoid_: error, exception
 A condition that should be impossible given correct library code: e.g. sending before the handshake completes, a nonce counter overflow. Indicates a bug, not a runtime condition. The library panics — crashing loudly is safer than silently continuing with broken crypto.
 _Avoid_: internal error, fatal error
 
+**Prologue**:
+Caller-supplied bytes passed to every `dial` and `accept` (both Handshake Patterns, Rust and FFI) and mixed into the Noise handshake hash. Both peers must pass byte-identical prologues; any difference makes the handshake fail on both sides. The library binds the bytes and nothing more: the caller owns their contents, sends any plaintext it wants the peer to see, and checks it. trueseal-sync uses it to bind the Transport Version prefix (sync ADR-0022). An empty prologue is allowed.
+_Avoid_: header, preamble, associated data
+
 **Initiator**:
 The peer that calls `dial` — sends the first handshake message. In XX, passes only its own Keypair. In NK, also passes the Responder's known static public key.
 _Avoid_: client, sender, caller
@@ -73,6 +77,7 @@ _Avoid_: golden tests, snapshot tests
 - A **Handshake Pattern** is executed between an **Initiator** and a **Responder** to produce a **Session**
 - **session_xx::Session** and **session_nk::Session** both wrap a **SessionInner** for their post-handshake behaviour
 - **XX Pattern** produces a **session_xx::Session**; **NK Pattern** produces a **session_nk::Session**
+- The **Initiator** and **Responder** must supply the same **Prologue** for a **Handshake Pattern** to complete
 
 ## Flagged ambiguities
 
