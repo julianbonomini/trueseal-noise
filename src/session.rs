@@ -55,10 +55,10 @@ impl<T: Read + Write> Write for RetryConn<T> {
 /// - Concurrent `receive` calls are serialised by `recv_lock`, held from the
 ///   first header byte through decrypt. Each call gets one whole frame.
 /// - One `send` and one `receive` can overlap. Neither holds `conn` or
-///   `transport` while waiting on the other: `receive` takes `conn` per
-///   `read()` call and `transport` only to decrypt; `send` takes `transport`
-///   only to encrypt. Overlap needs a transport whose `read()` returns
-///   `WouldBlock` (or data) instead of blocking while holding `conn`.
+///   `transport` while waiting on the other: both take `conn` per I/O
+///   attempt and release it before retrying WouldBlock/Interrupted. `send`
+///   takes `transport` only to encrypt. Overlap needs non-blocking reads
+///   and writes; a blocking I/O call still holds `conn`.
 ///
 /// Lock order is `send_lock`/`recv_lock` first, then `transport` or `conn`.
 /// `transport` and `conn` are never held at the same time.
@@ -152,11 +152,31 @@ impl<T: Read + Write + Send> SessionInner<T> {
         let mut framed = Vec::with_capacity(2 + len);
         framed.extend_from_slice(&(len as u16).to_be_bytes());
         framed.extend_from_slice(&ciphertext[..len]);
-        self.conn
-            .lock()
-            .map_err(|_| "noise: session poisoned".to_string())?
-            .write_all(&framed)
-            .map_err(|e| format!("noise: send: {}", e))
+        let mut written = 0;
+        while written < framed.len() {
+            // Drop conn before sleeping so a concurrent receive can progress.
+            let result = self
+                .conn
+                .lock()
+                .map_err(|_| "noise: session poisoned".to_string())?
+                .write(&framed[written..]);
+            match result {
+                Ok(0) => {
+                    return Err(format!(
+                        "noise: send: {}",
+                        io::Error::from(ErrorKind::WriteZero)
+                    ))
+                }
+                Ok(n) => written += n,
+                Err(e)
+                    if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::Interrupted =>
+                {
+                    std::thread::sleep(std::time::Duration::from_micros(50));
+                }
+                Err(e) => return Err(format!("noise: send: {}", e)),
+            }
+        }
+        Ok(())
     }
 
     /// Reads one framed message from the transport, decrypts it, and returns
@@ -390,5 +410,208 @@ mod tests {
     #[test]
     fn concurrent_receives_get_whole_frames_nk() {
         concurrent_receives_get_whole_frames("Noise_NK_25519_ChaChaPoly_BLAKE2s");
+    }
+
+    struct BoundedPipe {
+        inner: MemPipe,
+        interrupted: bool,
+        blocked: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Read for BoundedPipe {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.inner.read(buf)
+        }
+    }
+
+    impl Write for BoundedPipe {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.interrupted {
+                self.interrupted = false;
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            let mut out = self.inner.write_buf.lock().unwrap();
+            let n = buf.len().min(7 - out.len());
+            if n == 0 {
+                self.blocked
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            out.extend_from_slice(&buf[..n]);
+            self.interrupted = true;
+            Ok(n)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn send_backpressure(pattern: &str) {
+        let (i, r) = transports(pattern);
+        let (a, b) = mem_pipe_pair();
+        let blocked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tx = Arc::new(SessionInner::new(
+            BoundedPipe {
+                inner: a,
+                interrupted: false,
+                blocked: blocked.clone(),
+            },
+            i,
+        ));
+        let rx = Arc::new(SessionInner::new(b, r));
+        let (sent_tx, sent_rx) = std::sync::mpsc::channel();
+        let sender = tx.clone();
+        let handle = std::thread::spawn(move || {
+            for n in 0..3 {
+                let result = sender.send(&payload(0, n));
+                let failed = result.is_err();
+                sent_tx.send(result).unwrap();
+                if failed {
+                    return;
+                }
+            }
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while blocked.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no backpressure observed"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // Reading the reverse direction must proceed while send waits for space.
+        rx.send(b"reverse").unwrap();
+        let (read_tx, read_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            read_tx.send(tx.receive()).unwrap();
+        });
+        assert_eq!(
+            read_rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap(),
+            b"reverse"
+        );
+        let (received_tx, received_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for _ in 0..3 {
+                received_tx.send(rx.receive()).unwrap();
+            }
+        });
+        for n in 0..3 {
+            sent_rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .expect("send must retry partial-write WouldBlock");
+            assert_eq!(
+                received_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap()
+                    .unwrap(),
+                payload(0, n)
+            );
+        }
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn send_backpressure_xx() {
+        send_backpressure("Noise_XX_25519_ChaChaPoly_BLAKE2s");
+    }
+
+    #[test]
+    fn send_backpressure_nk() {
+        send_backpressure("Noise_NK_25519_ChaChaPoly_BLAKE2s");
+    }
+
+    struct ObservedTcp {
+        inner: std::net::TcpStream,
+        blocked: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl Read for ObservedTcp {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.inner.read(buf)
+        }
+    }
+    impl Write for ObservedTcp {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let result = self.inner.write(buf);
+            if matches!(&result, Err(e) if e.kind() == ErrorKind::WouldBlock) {
+                self.blocked
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            result
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    fn tcp_send_backpressure(pattern: &str) {
+        let (i, r) = transports(pattern);
+        let (mut a, mut b) = crate::test_helpers::tcp_pair();
+        a.set_nonblocking(true).unwrap();
+        b.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let filler = [0u8; 65536];
+        let mut filled = 0;
+        loop {
+            match a.write(&filler) {
+                Ok(n) => {
+                    filled += n;
+                    assert!(filled < 64 * 1024 * 1024);
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                other => panic!("unexpected fill result: {other:?}"),
+            }
+        }
+        let blocked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tx = SessionInner::new(
+            ObservedTcp {
+                inner: a,
+                blocked: blocked.clone(),
+            },
+            i,
+        );
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let sender = std::thread::spawn(move || {
+            for n in 0..256 {
+                tx.send(&vec![n as u8; MAX_PLAINTEXT_SIZE]).unwrap();
+            }
+            done_tx.send(()).unwrap();
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while blocked.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "send did not encounter full TCP buffer"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let mut drain = [0u8; 65536];
+        while filled > 0 {
+            let n = filled.min(drain.len());
+            b.read_exact(&mut drain[..n]).unwrap();
+            filled -= n;
+        }
+        let rx = SessionInner::new(b, r);
+        for n in 0..256 {
+            assert_eq!(rx.receive().unwrap(), vec![n as u8; MAX_PLAINTEXT_SIZE]);
+        }
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        sender.join().unwrap();
+        eprintln!(
+            "{pattern}: decrypted 256 maximum-size frames after {} TCP WouldBlock retries",
+            blocked.load(std::sync::atomic::Ordering::SeqCst)
+        );
+    }
+
+    #[test]
+    fn tcp_send_backpressure_xx() {
+        tcp_send_backpressure("Noise_XX_25519_ChaChaPoly_BLAKE2s");
+    }
+
+    #[test]
+    fn tcp_send_backpressure_nk() {
+        tcp_send_backpressure("Noise_NK_25519_ChaChaPoly_BLAKE2s");
     }
 }

@@ -41,7 +41,7 @@ A `pub(crate)` struct holding the shared post-handshake state used by both `sess
 _Avoid_: inner session, base session
 
 **Concurrency Contract**:
-The thread-safety guarantee of a Session. Concurrent `send` calls are serialised across encrypt and write, so nonce order equals wire order. Concurrent `receive` calls are serialised across read and decrypt, so each returns one whole frame. One `send` may overlap one `receive`, provided the transport's `read()` returns `WouldBlock` or data rather than blocking.
+The thread-safety guarantee of a Session. Concurrent `send` calls are serialised across encrypt and write, so nonce order equals wire order. Concurrent `receive` calls are serialised across read and decrypt, so each returns one whole frame. One `send` may overlap one `receive`, provided the transport's `read()` and `write()` return `WouldBlock` or make progress rather than blocking. Send retries `WouldBlock`/`Interrupted` from the same frame offset, releasing the connection between attempts while retaining sender serialisation; full buffers wait for space, without a built-in timeout. Other write errors are returned without automatically closing the session; they can leave the stream unusable after nonce advancement, so callers must discard failed-write sessions rather than assume a retry is safe.
 _Avoid_: thread safety, concurrent use
 
 **Keypair**:
@@ -53,7 +53,7 @@ A 2-byte big-endian length prefix prepended to every encrypted message by the li
 _Avoid_: length-prefix, header, envelope
 
 **Expected Failure**:
-A runtime error the caller should handle: I/O errors, malformed handshake messages, connection drops. Returned as `Result<_, String>` from `dial`, `accept`, `send`, or `receive`. Recoverable — the caller may retry or surface to the user.
+A runtime error the caller should handle: I/O errors, malformed handshake messages, connection drops. Returned as `Result<_, String>` from `dial`, `accept`, `send`, or `receive`. The caller may surface the error or reconnect; an error does not guarantee that the same session is reusable (in particular, a failed write can leave a missing or partial frame).
 _Avoid_: error, exception
 
 **Invariant Violation**:
