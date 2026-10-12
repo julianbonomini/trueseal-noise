@@ -63,6 +63,9 @@ dictionary KeypairRecord {
 /// read() must block until exactly `count` bytes are available and return them.
 /// write() must write all bytes and return only after the write is complete.
 /// Both methods may throw NoiseError on I/O failure.
+/// A terminal write failure after nonce advancement makes the Session unusable.
+/// close() does not shut down this transport or forcibly interrupt a blocked
+/// callback. The caller owns transport deadlines and shutdown.
 [Trait, WithForeign]
 interface NoiseTransport {
     [Throws=NoiseError]
@@ -79,6 +82,9 @@ interface NoiseTransport {
 /// transport and a send on another thread waits until that read returns.
 /// remote_public_key() returns the authenticated static public key of the
 /// remote peer unconditionally — mutual authentication is guaranteed by XX.
+/// Terminal write failure closes the session; later/queued operations throw
+/// Closed. close() marks it unusable without shutting down NoiseTransport.
+/// Pending operations observe closure only after a blocked callback returns.
 interface SessionXx {
     [Throws=NoiseError]
     void send([ByRef] sequence<u8> payload);
@@ -101,6 +107,9 @@ interface SessionXx {
 /// transport and a send on another thread waits until that read returns.
 /// remote_public_key() is absent — the Initiator is anonymous by design and
 /// the Initiator already knew the Responder's key before the handshake.
+/// Terminal write failure closes the session; later/queued operations throw
+/// Closed. close() marks it unusable without shutting down NoiseTransport.
+/// Pending operations observe closure only after a blocked callback returns.
 interface SessionNk {
     [Throws=NoiseError]
     void send([ByRef] sequence<u8> payload);

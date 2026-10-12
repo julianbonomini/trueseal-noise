@@ -143,11 +143,10 @@ session.remote_public_key()   -> [u8; 32]
 - trueseal-sync derives its Envelope limit and its 61,440-byte Protocol Size Limit from this ceiling, and the relay's envelope ceiling follows from it ([trueseal-sync ADR-0025](https://github.com/julianbonomini/trueseal-sync/blob/main/docs/adr/0025-single-frame-size-limit.md)). Raising it means widening the length prefix, which needs a Transport Version bump.
 - A session can be shared across threads (`Arc<Session>`). Concurrent `send` calls are serialised so frames reach the wire in nonce order; concurrent `receive` calls are serialised so each returns one whole frame.
 - `send` can overlap `receive` only if the transport's `read()` and `write()` return `WouldBlock` (or make progress) instead of blocking. A blocking I/O call holds the connection until it returns. Call `set_nonblocking(true)` on a `TcpStream` before `dial`/`accept` to get overlap; the handshake, `send`, and `receive` retry on `WouldBlock`/`Interrupted`. `send` retains its frame offset after a partial write and releases the connection between attempts, so a full send buffer waits for space without starving `receive` or letting another sender overtake it.
-- Other write errors (including a zero-byte write) still return `Err`; they do not automatically close the session. Once encryption has advanced the send nonce, a failed write can leave a missing or partial frame: do not assume that retrying `send` on that stream is safe. Discard the failed-write session and establish a new connection. No send timeout is provided.
+- A terminal write error (including a zero-byte write) after encryption advances the nonce returns `Err` and automatically makes the session closed/unusable, even when no frame bytes were written. Later and queued sends/receives reject; retry loops observe closure. Establish a new connection rather than retrying the failed frame. `WouldBlock`/`Interrupted` remain retryable; no send timeout is provided.
 - All I/O is **blocking**. Wrap in a thread or `spawn_blocking` if you need async.
-- Sessions are not resumable after `close()`.
-- `dial`, `accept`, `send`, and `receive` have no internal deadline. The caller's `Read + Write` transport must stop stalled I/O with a terminal error such as `TimedOut` or `UnexpectedEof`; `WouldBlock` and `Interrupted` are retried indefinitely. An OS socket timeout that returns `WouldBlock` is therefore not a Noise deadline. For non-blocking TCP, use a caller-owned adapter that checks an absolute deadline before each I/O attempt and returns `TimedOut` when it expires.
-- `close()` rejects subsequent calls; it does not close the underlying transport. A `receive` already retrying `WouldBlock` currently continues until peer activity, EOF, or a caller transport error ([#38](https://github.com/julianbonomini/trueseal-noise/issues/38)). Cooperative cancellation is approved in #38 but not yet implemented. Do not rely on `close()` alone to join a pending reader.
+- `dial`, `accept`, `send`, and `receive` have no internal deadline. The caller's `Read + Write` transport must stop stalled I/O with a terminal error such as `TimedOut` or `UnexpectedEof`; `WouldBlock` and `Interrupted` are retried indefinitely while the session remains open. An OS socket timeout that returns `WouldBlock` is therefore not a Noise deadline. For non-blocking TCP, use a caller-owned adapter that checks an absolute deadline before each I/O attempt and returns `TimedOut` when it expires.
+- `close()` marks the session unusable without closing the caller's transport. Pending nonblocking receives return `Err` when they next observe closure, including partial header/body reads; queued and subsequent receives reject. Send retry loops also observe closure. An already-blocked transport `read()` or `write()` is **not** forcibly interrupted: the caller still owns deadlines/shutdown. Sessions are not resumable after closure.
 
 ---
 
@@ -178,6 +177,8 @@ Silent-peer tests supply an absolute deadline in the caller's transport. Termina
 ## UniFFI bindings (Swift / Kotlin)
 
 The `ffi` module wraps the core API for UniFFI. Callers implement a `NoiseTransport` callback interface (two methods: `read(count)` and `write(data)`) in Swift or Kotlin — no manual FFI glue required.
+
+`SessionXx` and `SessionNk` have the same closed-state guarantees as Rust sessions. A terminal `NoiseTransport.write` failure after nonce advancement makes the session unusable; later/queued operations return `NoiseError::Closed`. `close()` never shuts down the callback transport. An already-blocked callback must return through the caller's deadline or shutdown before it can observe closure.
 
 ```sh
 cargo build

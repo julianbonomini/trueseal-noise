@@ -32,17 +32,22 @@ impl<T: Read + Write + Send> Session<T> {
 
     /// Encrypts payload and writes it to the transport with a 2-byte
     /// big-endian length prefix.
+    /// A terminal write failure after nonce advancement closes the session;
+    /// later/queued operations reject. WouldBlock/Interrupted remain retryable.
     pub fn send(&self, payload: &[u8]) -> Result<(), String> {
         self.inner.send(payload)
     }
 
     /// Reads one framed message from the transport and decrypts it.
+    /// Pending nonblocking reads, including partial frames, return an error
+    /// when they next observe closure. Blocking I/O remains caller-owned.
     pub fn receive(&self) -> Result<Vec<u8>, String> {
         self.inner.receive()
     }
 
-    /// Closes the session. Subsequent send/receive return errors.
-    /// Sessions are not resumable after close.
+    /// Marks the session unusable; queued operations and retry loops reject
+    /// when they observe closure. Does not shut down the caller's transport
+    /// or interrupt already-blocked I/O. Sessions are not resumable.
     pub fn close(&self) -> io::Result<()> {
         self.inner.close()
     }

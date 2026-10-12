@@ -1,4 +1,5 @@
 use std::io::{self, ErrorKind, Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::framing::MAX_PLAINTEXT_SIZE;
@@ -67,7 +68,7 @@ pub(crate) struct SessionInner<T: Read + Write + Send> {
     transport: Mutex<snow::TransportState>,
     send_lock: Mutex<()>,
     recv_lock: Mutex<()>,
-    closed: Mutex<bool>,
+    closed: AtomicBool,
 }
 
 impl<T: Read + Write + Send> SessionInner<T> {
@@ -77,7 +78,15 @@ impl<T: Read + Write + Send> SessionInner<T> {
             transport: Mutex::new(transport),
             send_lock: Mutex::new(()),
             recv_lock: Mutex::new(()),
-            closed: Mutex::new(false),
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    fn check_open(&self) -> Result<(), &'static str> {
+        if self.closed.load(Ordering::Acquire) {
+            Err("noise: session is closed")
+        } else {
+            Ok(())
         }
     }
 
@@ -85,18 +94,26 @@ impl<T: Read + Write + Send> SessionInner<T> {
     /// so concurrent send() can interleave. Callers must hold `recv_lock`, or
     /// another reader could take bytes from the middle of this frame.
     ///
-    /// The guard is bound to a `let` so it drops at the `;` — before the
-    /// match — ensuring the lock is never held across the WouldBlock sleep.
+    /// The conn guard is scoped to one read attempt, so it is never held
+    /// across the WouldBlock/Interrupted sleep.
     pub(crate) fn read_exact_interruptible(&self, n: usize) -> io::Result<Vec<u8>> {
+        self.check_open().map_err(io::Error::other)?;
         let mut buf = vec![0u8; n];
         let mut filled = 0;
         while filled < n {
-            // Lock, read, unlock (guard drops at `;` before match).
-            let result = self
-                .conn
-                .lock()
-                .map_err(|_| io::Error::other("noise: session poisoned"))?
-                .read(&mut buf[filled..]);
+            // Recheck after acquiring conn: this attempt may have queued behind
+            // an I/O call that closed the session. Never hold conn while retrying.
+            let result = {
+                let mut conn = self
+                    .conn
+                    .lock()
+                    .map_err(|_| io::Error::other("noise: session poisoned"))?;
+                self.check_open().map_err(io::Error::other)?;
+                conn.read(&mut buf[filled..])
+            };
+            // A caller-owned blocking read cannot be interrupted by close(),
+            // but closure is observed as soon as that read returns.
+            self.check_open().map_err(io::Error::other)?;
             match result {
                 Ok(0) => {
                     return Err(io::Error::new(
@@ -128,45 +145,56 @@ impl<T: Read + Write + Send> SessionInner<T> {
                 MAX_PLAINTEXT_SIZE
             ));
         }
-        if *self
-            .closed
-            .lock()
-            .map_err(|_| "noise: session poisoned".to_string())?
-        {
-            return Err("noise: session is closed".to_string());
-        }
+        self.check_open().map_err(|e| e.to_string())?;
         // Held across encrypt and write: releasing it in between would let
         // another sender write nonce n+1 before this frame's nonce n.
         let _send_guard = self
             .send_lock
             .lock()
             .map_err(|_| "noise: session poisoned".to_string())?;
+        // A queued sender must reject before consuming another nonce.
+        self.check_open().map_err(|e| e.to_string())?;
         // Allocate ciphertext buffer: plaintext + 16-byte AEAD tag.
         let mut ciphertext = vec![0u8; payload.len() + 16];
-        let len = self
-            .transport
-            .lock()
-            .map_err(|_| "noise: session poisoned".to_string())?
-            .write_message(payload, &mut ciphertext)
-            .map_err(|e| format!("noise: encrypt: {:?}", e))?;
+        let len = {
+            let mut transport = self
+                .transport
+                .lock()
+                .map_err(|_| "noise: session poisoned".to_string())?;
+            self.check_open().map_err(|e| e.to_string())?;
+            transport
+                .write_message(payload, &mut ciphertext)
+                .map_err(|e| format!("noise: encrypt: {:?}", e))?
+        };
         let mut framed = Vec::with_capacity(2 + len);
         framed.extend_from_slice(&(len as u16).to_be_bytes());
         framed.extend_from_slice(&ciphertext[..len]);
         let mut written = 0;
         while written < framed.len() {
-            // Drop conn before sleeping so a concurrent receive can progress.
+            // Mark terminal failures before releasing conn, so a queued I/O
+            // attempt cannot use a stream with a missing or partial frame.
             let result = self
                 .conn
                 .lock()
-                .map_err(|_| "noise: session poisoned".to_string())?
-                .write(&framed[written..]);
+                .map_err(|_| io::Error::other("noise: session poisoned"))
+                .and_then(|mut conn| {
+                    self.check_open().map_err(io::Error::other)?;
+                    match conn.write(&framed[written..]) {
+                        Ok(0) => {
+                            self.closed.store(true, Ordering::Release);
+                            Err(io::Error::from(ErrorKind::WriteZero))
+                        }
+                        Err(e)
+                            if e.kind() != ErrorKind::WouldBlock
+                                && e.kind() != ErrorKind::Interrupted =>
+                        {
+                            self.closed.store(true, Ordering::Release);
+                            Err(e)
+                        }
+                        other => other,
+                    }
+                });
             match result {
-                Ok(0) => {
-                    return Err(format!(
-                        "noise: send: {}",
-                        io::Error::from(ErrorKind::WriteZero)
-                    ))
-                }
                 Ok(n) => written += n,
                 Err(e)
                     if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::Interrupted =>
@@ -183,19 +211,14 @@ impl<T: Read + Write + Send> SessionInner<T> {
     /// the plaintext. Concurrent callers are serialised so each gets one whole
     /// frame, decrypted in wire order.
     pub(crate) fn receive(&self) -> Result<Vec<u8>, String> {
-        if *self
-            .closed
-            .lock()
-            .map_err(|_| "noise: session poisoned".to_string())?
-        {
-            return Err("noise: session is closed".to_string());
-        }
+        self.check_open().map_err(|e| e.to_string())?;
         // Held across both reads and decrypt so concurrent receivers cannot
         // split a frame or decrypt frames out of nonce order.
         let _recv_guard = self
             .recv_lock
             .lock()
             .map_err(|_| "noise: session poisoned".to_string())?;
+        self.check_open().map_err(|e| e.to_string())?;
         let header = self
             .read_exact_interruptible(2)
             .map_err(|e| format!("noise: receive header: {}", e))?;
@@ -204,22 +227,25 @@ impl<T: Read + Write + Send> SessionInner<T> {
             .read_exact_interruptible(size)
             .map_err(|e| format!("noise: receive body: {}", e))?;
         let mut plaintext = vec![0u8; size];
-        let len = self
-            .transport
-            .lock()
-            .map_err(|_| "noise: session poisoned".to_string())?
-            .read_message(&ciphertext, &mut plaintext)
-            .map_err(|e| format!("noise: decrypt: {:?}", e))?;
+        let len = {
+            let mut transport = self
+                .transport
+                .lock()
+                .map_err(|_| "noise: session poisoned".to_string())?;
+            self.check_open().map_err(|e| e.to_string())?;
+            transport
+                .read_message(&ciphertext, &mut plaintext)
+                .map_err(|e| format!("noise: decrypt: {:?}", e))?
+        };
         plaintext.truncate(len);
         Ok(plaintext)
     }
 
-    /// Closes the session. Subsequent send/receive return errors.
+    /// Marks the session closed without shutting down the caller's transport.
+    /// Queued operations and retry loops reject when they observe closure;
+    /// already-blocked transport calls still need caller deadlines/shutdown.
     pub(crate) fn close(&self) -> io::Result<()> {
-        *self
-            .closed
-            .lock()
-            .map_err(|_| io::Error::other("noise: session poisoned"))? = true;
+        self.closed.store(true, Ordering::Release);
         Ok(())
     }
 }
