@@ -37,8 +37,12 @@ A fully negotiated, bidirectional encrypted channel produced by the NK Handshake
 _Avoid_: NK connection, NK tunnel
 
 **SessionInner**:
-A `pub(crate)` struct holding the shared post-handshake state used by both `session_xx::Session` and `session_nk::Session`: two `CipherState`s (one per direction), the transport, and a closed flag. Not part of the public API. The handshake pattern affects how `SessionInner` is constructed, not how it behaves afterwards.
+A `pub(crate)` struct holding the shared post-handshake state used by both `session_xx::Session` and `session_nk::Session`: snow's `TransportState` (both directions' cipher states), the transport, and a closed flag. Not part of the public API. The handshake pattern affects how `SessionInner` is constructed, not how it behaves afterwards. It owns the **Concurrency Contract**.
 _Avoid_: inner session, base session
+
+**Concurrency Contract**:
+The thread-safety guarantee of a Session. Concurrent `send` calls are serialised across encrypt and write, so nonce order equals wire order. Concurrent `receive` calls are serialised across read and decrypt, so each returns one whole frame. One `send` may overlap one `receive`, provided the transport's `read()` returns `WouldBlock` or data rather than blocking.
+_Avoid_: thread safety, concurrent use
 
 **Keypair**:
 A static X25519 public/private key pair representing a peer's long-term identity. Generated and stored by the caller; passed into the library at dial/accept time. The library never generates or persists keypairs.

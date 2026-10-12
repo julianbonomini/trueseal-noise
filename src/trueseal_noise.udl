@@ -73,7 +73,10 @@ interface NoiseTransport {
 };
 
 /// A fully negotiated, bidirectional encrypted channel produced by the XX
-/// Handshake Pattern. send and receive are safe to call concurrently.
+/// Handshake Pattern. The session is thread-safe: concurrent send calls are
+/// serialised in nonce order and concurrent receive calls each return one
+/// whole frame. NoiseTransport.read() blocks, so a pending receive holds the
+/// transport and a send on another thread waits until that read returns.
 /// remote_public_key() returns the authenticated static public key of the
 /// remote peer unconditionally — mutual authentication is guaranteed by XX.
 interface SessionXx {
@@ -92,7 +95,10 @@ interface SessionXx {
 };
 
 /// A fully negotiated, bidirectional encrypted channel produced by the NK
-/// Handshake Pattern. send and receive are safe to call concurrently.
+/// Handshake Pattern. The session is thread-safe: concurrent send calls are
+/// serialised in nonce order and concurrent receive calls each return one
+/// whole frame. NoiseTransport.read() blocks, so a pending receive holds the
+/// transport and a send on another thread waits until that read returns.
 /// remote_public_key() is absent — the Initiator is anonymous by design and
 /// the Initiator already knew the Responder's key before the handshake.
 interface SessionNk {

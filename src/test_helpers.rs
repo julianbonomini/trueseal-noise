@@ -79,3 +79,26 @@ pub(crate) fn tcp_pair() -> (std::net::TcpStream, std::net::TcpStream) {
     let (server, _) = listener.accept().expect("accept loopback");
     (client, server)
 }
+
+/// Wraps a transport and sleeps inside every `write`, holding the caller's
+/// conn lock longer. This widens race windows between concurrent senders.
+pub(crate) struct SlowWriter<T: Read + Write> {
+    pub(crate) inner: T,
+    pub(crate) delay: std::time::Duration,
+}
+
+impl<T: Read + Write> Read for SlowWriter<T> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl<T: Read + Write> Write for SlowWriter<T> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        std::thread::sleep(self.delay);
+        self.inner.write(buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
