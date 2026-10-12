@@ -49,13 +49,24 @@ impl<T: Read + Write> Write for RetryConn<T> {
 /// `session_nk::Session`. Holds the transport, a snow TransportState, and
 /// the closed flag.
 ///
-/// snow::TransportState requires &mut self — all crypto ops are serialised
-/// through a single Mutex. send and receive acquire the transport mutex
-/// separately from the conn mutex so concurrent callers can at least overlap
-/// I/O waits.
+/// Concurrency contract:
+/// - Concurrent `send` calls are serialised by `send_lock`, held from encrypt
+///   through the final write. Nonce order therefore always equals wire order.
+/// - Concurrent `receive` calls are serialised by `recv_lock`, held from the
+///   first header byte through decrypt. Each call gets one whole frame.
+/// - One `send` and one `receive` can overlap. Neither holds `conn` or
+///   `transport` while waiting on the other: `receive` takes `conn` per
+///   `read()` call and `transport` only to decrypt; `send` takes `transport`
+///   only to encrypt. Overlap needs a transport whose `read()` returns
+///   `WouldBlock` (or data) instead of blocking while holding `conn`.
+///
+/// Lock order is `send_lock`/`recv_lock` first, then `transport` or `conn`.
+/// `transport` and `conn` are never held at the same time.
 pub(crate) struct SessionInner<T: Read + Write + Send> {
     conn: Arc<Mutex<T>>,
     transport: Mutex<snow::TransportState>,
+    send_lock: Mutex<()>,
+    recv_lock: Mutex<()>,
     closed: Mutex<bool>,
 }
 
@@ -64,12 +75,15 @@ impl<T: Read + Write + Send> SessionInner<T> {
         Self {
             conn: Arc::new(Mutex::new(conn)),
             transport: Mutex::new(transport),
+            send_lock: Mutex::new(()),
+            recv_lock: Mutex::new(()),
             closed: Mutex::new(false),
         }
     }
 
     /// Read exactly `n` bytes, releasing the conn mutex between read() calls
-    /// so concurrent send() can interleave.
+    /// so concurrent send() can interleave. Callers must hold `recv_lock`, or
+    /// another reader could take bytes from the middle of this frame.
     ///
     /// The guard is bound to a `let` so it drops at the `;` — before the
     /// match — ensuring the lock is never held across the WouldBlock sleep.
@@ -104,7 +118,8 @@ impl<T: Read + Write + Send> SessionInner<T> {
     }
 
     /// Encrypts payload and writes it to the transport with a 2-byte
-    /// big-endian length prefix.
+    /// big-endian length prefix. Concurrent callers are serialised so frames
+    /// reach the wire in nonce order.
     pub(crate) fn send(&self, payload: &[u8]) -> Result<(), String> {
         if payload.len() > MAX_PLAINTEXT_SIZE {
             return Err(format!(
@@ -120,6 +135,12 @@ impl<T: Read + Write + Send> SessionInner<T> {
         {
             return Err("noise: session is closed".to_string());
         }
+        // Held across encrypt and write: releasing it in between would let
+        // another sender write nonce n+1 before this frame's nonce n.
+        let _send_guard = self
+            .send_lock
+            .lock()
+            .map_err(|_| "noise: session poisoned".to_string())?;
         // Allocate ciphertext buffer: plaintext + 16-byte AEAD tag.
         let mut ciphertext = vec![0u8; payload.len() + 16];
         let len = self
@@ -139,7 +160,8 @@ impl<T: Read + Write + Send> SessionInner<T> {
     }
 
     /// Reads one framed message from the transport, decrypts it, and returns
-    /// the plaintext.
+    /// the plaintext. Concurrent callers are serialised so each gets one whole
+    /// frame, decrypted in wire order.
     pub(crate) fn receive(&self) -> Result<Vec<u8>, String> {
         if *self
             .closed
@@ -148,6 +170,12 @@ impl<T: Read + Write + Send> SessionInner<T> {
         {
             return Err("noise: session is closed".to_string());
         }
+        // Held across both reads and decrypt so concurrent receivers cannot
+        // split a frame or decrypt frames out of nonce order.
+        let _recv_guard = self
+            .recv_lock
+            .lock()
+            .map_err(|_| "noise: session poisoned".to_string())?;
         let header = self
             .read_exact_interruptible(2)
             .map_err(|e| format!("noise: receive header: {}", e))?;

@@ -70,7 +70,7 @@ let r_session = r_handle.join().unwrap();
 // Trust policy is yours — the library only guarantees the crypto.
 assert_eq!(i_session.remote_public_key(), responder_kp.public_key);
 
-// Framed, encrypted. send/receive are safe to call concurrently.
+// Framed, encrypted. See "Limits" below for the threading contract.
 i_session.send(b"hello").unwrap();
 let msg = r_session.receive().unwrap(); // → b"hello"
 ```
@@ -141,7 +141,8 @@ session.remote_public_key()   -> [u8; 32]
 **Limits**
 - Max plaintext per message: **65,519 bytes**. The frame length prefix is a u16, so a frame holds at most 65,535 bytes, and the 16-byte AEAD tag takes 16 of them. `send` returns `Err` for a larger payload and writes nothing; the session stays usable. Rust callers can read the value as `trueseal_noise::MAX_PLAINTEXT_SIZE`.
 - trueseal-sync derives its Envelope limit and its 61,440-byte Protocol Size Limit from this ceiling, and the relay's envelope ceiling follows from it ([trueseal-sync ADR-0025](https://github.com/julianbonomini/trueseal-sync/blob/main/docs/adr/0025-single-frame-size-limit.md)). Raising it means widening the length prefix, which needs a Transport Version bump.
-- `send` and `receive` are safe to call concurrently on the same session.
+- A session can be shared across threads (`Arc<Session>`). Concurrent `send` calls are serialised so frames reach the wire in nonce order; concurrent `receive` calls are serialised so each returns one whole frame.
+- `send` can overlap `receive` only if the transport's `read()` returns `WouldBlock` (or data) instead of blocking. With a blocking `read()`, such as a `TcpStream` in its default mode, a pending `receive` holds the connection and `send` waits until data arrives. Call `set_nonblocking(true)` on a `TcpStream` before `dial`/`accept` to get overlap; the handshake and `receive` retry on `WouldBlock`.
 - All I/O is **blocking**. Wrap in a thread or `spawn_blocking` if you need async.
 - Sessions are not resumable after `close()`.
 

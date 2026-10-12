@@ -7,8 +7,14 @@ use crate::{
 };
 
 /// A fully negotiated, bidirectional encrypted channel produced by the NK
-/// Handshake Pattern. `send` and `receive` are safe to call concurrently.
-/// Sessions are not resumable after close.
+/// Handshake Pattern. Sessions are not resumable after close.
+///
+/// `Session` is `Sync`: share it with `Arc` and call it from many threads.
+/// Concurrent `send` calls are serialised, so frames reach the wire in nonce
+/// order. Concurrent `receive` calls are serialised, so each returns one
+/// whole frame. One `send` can overlap one `receive` only if the transport's
+/// `read()` returns `WouldBlock` (or data) rather than blocking; a blocking
+/// `read()` holds the connection and stalls `send` until data arrives.
 ///
 /// The NK pattern is anonymous for the Initiator — the Responder never
 /// learns the Initiator's static key. `remote_public_key()` is therefore
