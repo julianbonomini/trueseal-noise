@@ -66,8 +66,8 @@ mod tests {
         let r_kp = generate_keypair();
         let r_kp2 = Keypair::new(r_kp.private(), r_kp.public_key);
         let (i_conn, r_conn) = mem_pipe_pair();
-        let r_handle = std::thread::spawn(move || session_xx::accept(r_conn, r_kp2));
-        let i = session_xx::dial(i_conn, i_kp).expect("dial failed");
+        let r_handle = std::thread::spawn(move || session_xx::accept(r_conn, r_kp2, b""));
+        let i = session_xx::dial(i_conn, i_kp, b"").expect("dial failed");
         let r = r_handle.join().unwrap().expect("accept failed");
         (i, r)
     }
@@ -78,8 +78,8 @@ mod tests {
         let r_pub = r_kp.public_key;
         let r_kp2 = Keypair::new(r_kp.private(), r_pub);
         let (i_conn, r_conn) = mem_pipe_pair();
-        let r_handle = std::thread::spawn(move || session_nk::accept(r_conn, r_kp2));
-        let i = session_nk::dial(i_conn, i_kp, r_pub).expect("dial failed");
+        let r_handle = std::thread::spawn(move || session_nk::accept(r_conn, r_kp2, b""));
+        let i = session_nk::dial(i_conn, i_kp, r_pub, b"").expect("dial failed");
         let r = r_handle.join().unwrap().expect("accept failed");
         (i, r)
     }
