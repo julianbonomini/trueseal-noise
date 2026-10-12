@@ -146,6 +146,8 @@ session.remote_public_key()   -> [u8; 32]
 - Other write errors (including a zero-byte write) still return `Err`; they do not automatically close the session. Once encryption has advanced the send nonce, a failed write can leave a missing or partial frame: do not assume that retrying `send` on that stream is safe. Discard the failed-write session and establish a new connection. No send timeout is provided.
 - All I/O is **blocking**. Wrap in a thread or `spawn_blocking` if you need async.
 - Sessions are not resumable after `close()`.
+- `dial`, `accept`, `send`, and `receive` have no internal deadline. The caller's `Read + Write` transport must stop stalled I/O with a terminal error such as `TimedOut` or `UnexpectedEof`; `WouldBlock` and `Interrupted` are retried indefinitely. An OS socket timeout that returns `WouldBlock` is therefore not a Noise deadline. For non-blocking TCP, use a caller-owned adapter that checks an absolute deadline before each I/O attempt and returns `TimedOut` when it expires.
+- `close()` rejects subsequent calls; it does not close the underlying transport. A `receive` already retrying `WouldBlock` currently continues until peer activity, EOF, or a caller transport error ([#38](https://github.com/julianbonomini/trueseal-noise/issues/38)). Cooperative cancellation is approved in #38 but not yet implemented. Do not rely on `close()` alone to join a pending reader.
 
 ---
 
@@ -166,6 +168,10 @@ cargo test --test cacophony
 ```
 
 Runs every `Noise_NK` and `Noise_XX` message from the Cacophony suite byte-for-byte, including handshake hash verification. The vectors use a non-empty prologue. `cargo test prologue_vectors` also drives them through `dial`/`accept`: transport ciphertexts match the vectors byte-for-byte, `dial`/`accept` interoperate with a peer configured from the vector, and a one-byte prologue change makes that handshake fail. Passing these means interoperability with any other spec-compliant Noise implementation, not just internal self-consistency.
+
+`tests/adversarial.rs` drives public XX/NK `dial`, `accept`, and `receive` against a snow peer over loopback TCP. It covers truncated and tampered handshakes, stale authenticated handshake messages and wrong-role replays, transport tampering/replay/reordering, invalid zero-byte frame bodies, declared lengths longer than the available body followed by EOF, the wrong NK responder key, and peer close during the handshake. Complete hostile messages keep the peer connected and must fail at the attacked Noise parsing/authentication step; EOF and deadline errors cannot satisfy those assertions. Authenticated empty application payloads remain valid: their frames contain a 16-byte tag. A fresh Noise handshake does not provide a cache that rejects every replayed first message; the replay tests cover invalid transcript/state reuse, not application replay protection.
+
+Silent-peer tests supply an absolute deadline in the caller's transport. Terminal `TimedOut`/`UnexpectedEof` tests cover handshake and receive failures, including partial frame headers and bodies. Existing `cargo test tcp_send_backpressure -- --nocapture` coverage from [#35](https://github.com/julianbonomini/trueseal-noise/issues/35) fills a real non-blocking TCP send buffer and checks that XX/NK decrypt every frame once it drains; it does not claim a built-in send deadline.
 
 ---
 
@@ -198,6 +204,7 @@ src/
   trueseal_noise.udl    — UniFFI interface definition
 tests/
   cacophony.rs      — Cacophony spec-vector conformance
+  adversarial.rs    — public XX/NK hostile-input and caller-deadline coverage
 ```
 
 ---

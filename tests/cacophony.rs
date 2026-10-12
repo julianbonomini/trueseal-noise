@@ -3,7 +3,6 @@
 /// Verifies that trueseal-noise (via snow) produces byte-exact ciphertext for every
 /// Noise_NK and Noise_XX vector in testdata/cacophony.json. The vectors fix
 /// both static and ephemeral keys so outputs are fully deterministic.
-use hex;
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -168,7 +167,7 @@ fn run_vector(v: &Vector) {
     // the first transport message.
     // NK  (n_hs=2, last hs msg sent by resp → init received it) → init sends first.
     // XX  (n_hs=3, last hs msg sent by init → resp received it) → resp sends first.
-    let resp_sends_first = (n_hs - 1) % 2 == 0; // last hs sender is init ↔ resp sends first
+    let resp_sends_first = (n_hs - 1).is_multiple_of(2); // last hs sender is init ↔ resp sends first
 
     for (t_idx, msg) in v.messages[n_hs..].iter().enumerate() {
         let payload = h(&msg.payload);
