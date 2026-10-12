@@ -136,6 +136,9 @@ impl Write for TransportWrapper {
 // ── SessionXx ─────────────────────────────────────────────────────────────────
 
 /// FFI-visible XX session. Maps to UDL `interface SessionXx`.
+/// Terminal write failure after nonce advancement makes the session unusable;
+/// later/queued operations report Closed. close() does not shut down callbacks
+/// or interrupt blocked I/O; caller deadlines/shutdown remain required.
 pub struct SessionXx {
     inner: Arc<CoreSessionXx<TransportWrapper>>,
 }
@@ -166,6 +169,9 @@ impl SessionXx {
 
 /// FFI-visible NK session. Maps to UDL `interface SessionNk`.
 /// No remote_public_key() — initiator is anonymous, responder has no remote static.
+/// Terminal write failure after nonce advancement makes the session unusable;
+/// later/queued operations report Closed. close() does not shut down callbacks
+/// or interrupt blocked I/O; caller deadlines/shutdown remain required.
 pub struct SessionNk {
     inner: Arc<CoreSessionNk<TransportWrapper>>,
 }
