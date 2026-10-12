@@ -11,6 +11,8 @@ pub mod session_nk;
 pub mod session_xx;
 
 #[cfg(test)]
+mod prologue_vectors;
+#[cfg(test)]
 pub(crate) mod test_helpers;
 
 // Re-export all FFI symbols at the crate root so the UniFFI-generated
