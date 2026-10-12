@@ -32,7 +32,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Check tag matches Cargo.toml version
-        run: scripts/check-tag-version.sh "${{ github.ref_name }}"
+        env:
+          TAG: ${{ github.ref_name }}
+        run: scripts/check-tag-version.sh "$TAG"
 
       - uses: dtolnay/rust-toolchain@stable
         with:

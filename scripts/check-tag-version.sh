@@ -19,7 +19,7 @@ tag_version="${BASH_REMATCH[1]}"
 
 # First `version = "..."` inside the [package] table.
 cargo_version="$(awk '
-  /^\[/ { in_pkg = ($0 == "[package]") ; next }
+  /^\[/ { in_pkg = ($0 ~ /^\[package\][[:space:]]*(#.*)?$/) ; next }
   in_pkg && /^version[[:space:]]*=/ {
     match($0, /"[^"]*"/)
     print substr($0, RSTART + 1, RLENGTH - 2)
