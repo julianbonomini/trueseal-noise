@@ -45,7 +45,7 @@ A static X25519 public/private key pair representing a peer's long-term identity
 _Avoid_: identity, credentials, keys
 
 **Framing**:
-A 2-byte big-endian length prefix prepended to every encrypted message by the library. Required because Noise encryption is per-message — without framing, a stream receiver cannot determine message boundaries and cannot decrypt. The caller never sees framing; it is an internal concern of the library. Maximum message size is 65535 bytes (the Noise spec hard cap); chunking larger payloads is the caller's responsibility.
+A 2-byte big-endian length prefix prepended to every encrypted message by the library. Required because Noise encryption is per-message — without framing, a stream receiver cannot determine message boundaries and cannot decrypt. The caller never sees framing; it is an internal concern of the library. Because the prefix is a u16, a frame holds at most 65,535 bytes of ciphertext, which is also the Noise spec's message cap. The 16-byte AEAD tag is part of that ciphertext, so the largest plaintext a caller can `send` is 65,519 bytes (`MAX_PLAINTEXT_SIZE`). Larger payloads are rejected, never split; chunking is the caller's responsibility. trueseal-sync derives its Envelope limit and its 61,440-byte Protocol Size Limit from this ceiling ([ADR-0025](https://github.com/julianbonomini/trueseal-sync/blob/main/docs/adr/0025-single-frame-size-limit.md)), so raising it needs a Transport Version bump.
 _Avoid_: length-prefix, header, envelope
 
 **Expected Failure**:
